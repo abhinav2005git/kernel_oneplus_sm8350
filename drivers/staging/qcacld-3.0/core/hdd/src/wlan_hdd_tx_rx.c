@@ -1076,17 +1076,19 @@ static bool hdd_injection_frame_is_valid(const struct sk_buff *skb)
 	const struct ieee80211_hdr *hdr;
 	unsigned int hdr_len;
 
-	/* Management frames use the normal three-address, 24-byte header. */
-	if (skb->len < sizeof(struct ieee80211_hdr_3addr))
+	/* Every 802.11 frame has frame control and a type-specific header. */
+	if (skb->len < sizeof(hdr->frame_control))
 		return false;
 
 	hdr = (const struct ieee80211_hdr *)skb->data;
 	hdr_len = ieee80211_hdrlen(hdr->frame_control);
 
-	if (hdr_len < sizeof(struct ieee80211_hdr_3addr) || skb->len < hdr_len)
+	if (!hdr_len || skb->len < hdr_len)
 		return false;
 
-	return ieee80211_is_mgmt(hdr->frame_control);
+	return ieee80211_is_mgmt(hdr->frame_control) ||
+	       ieee80211_is_ctl(hdr->frame_control) ||
+	       ieee80211_is_data(hdr->frame_control);
 }
 
 static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
@@ -1123,7 +1125,7 @@ static void hdd_monitor_mode_tx_inject(struct hdd_adapter *adapter,
 				  adapter->vdev_id);
 	if (QDF_IS_STATUS_ERROR(status)) {
 		hdd_dp_warn_rl("monitor tx: injection failed vdev %u status %d",
-			       adapter->deflink->vdev_id, status);
+			       adapter->vdev_id, status);
 		kfree_skb(skb);
 		return;
 	}

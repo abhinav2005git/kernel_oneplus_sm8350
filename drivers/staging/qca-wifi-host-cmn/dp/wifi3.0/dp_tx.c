@@ -46,6 +46,19 @@
 #include <dp_swlm.h>
 #endif
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+#define DP_TX_INJECTION_DESC_PREFIX 0xf000
+
+static inline bool dp_tx_is_injection_nbuf(qdf_nbuf_t nbuf)
+{
+	return (QDF_NBUF_CB_MGMT_TXRX_DESC_ID(nbuf) &
+		DP_TX_INJECTION_DESC_PREFIX) == DP_TX_INJECTION_DESC_PREFIX;
+}
+
+extern bool wma_injection_dp_complete(void *wma_context, qdf_nbuf_t nbuf,
+				      int32_t status);
+#endif
+
 /* Flag to skip CCE classify when mesh or tid override enabled */
 #define DP_TX_SKIP_CCE_CLASSIFY \
 	(DP_TXRX_HLOS_TID_OVERRIDE_ENABLED | DP_TX_MESH_ENABLED)
@@ -2360,6 +2373,11 @@ static inline void dp_tx_comp_free_buf(struct dp_soc *soc,
 	if (desc->flags & DP_TX_DESC_FLAG_TDLS_FRAME)
 		return dp_non_std_tx_comp_free_buff(soc, desc);
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (dp_tx_is_injection_nbuf(nbuf))
+		wma_injection_dp_complete(NULL, nbuf, 0);
+#endif
+
 	/* 0 : MSDU buffer, 1 : MLE */
 	if (desc->msdu_ext_desc) {
 		/* TSO free */
@@ -2968,6 +2986,7 @@ dp_tx_send_exception(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 	struct dp_soc *soc = cdp_soc_t_to_dp_soc(soc_hdl);
 	qdf_ether_header_t *eh = NULL;
 	struct dp_tx_msdu_info_s msdu_info;
+	struct dp_tx_seg_info_s raw_seg_info = {0};
 	struct dp_vdev *vdev = dp_vdev_get_ref_by_id(soc, vdev_id,
 						     DP_MOD_ID_TX_EXCEPTION);
 
@@ -3001,6 +3020,19 @@ dp_tx_send_exception(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 		QDF_TRACE(QDF_MODULE_ID_DP, QDF_TRACE_LEVEL_ERROR,
 			"Mesh mode is not supported in exception path");
 		goto fail;
+	}
+
+	if (qdf_unlikely(tx_exc_metadata->is_raw_injection)) {
+		if (tx_exc_metadata->tx_encap_type != htt_cmn_pkt_type_raw)
+			goto fail;
+
+		msdu_info.tid = HTT_TX_EXT_TID_DEFAULT;
+		nbuf = dp_tx_prepare_raw(vdev, nbuf, &raw_seg_info,
+					 &msdu_info);
+		if (!nbuf)
+			goto fail;
+
+		goto send_multiple;
 	}
 
 	/*
@@ -3081,6 +3113,8 @@ dp_tx_send_exception(struct cdp_soc_t *soc_hdl, uint8_t vdev_id,
 
 send_multiple:
 	nbuf = dp_tx_send_msdu_multiple(vdev, nbuf, &msdu_info);
+	if (qdf_unlikely(nbuf && msdu_info.frm_type == dp_tx_frm_raw))
+		dp_tx_raw_prepare_unset(soc, nbuf);
 
 fail:
 	if (vdev)
@@ -4559,6 +4593,11 @@ void dp_tx_comp_process_tx_status(struct dp_soc *soc,
 		goto out;
 	}
 
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+	if (dp_tx_is_injection_nbuf(nbuf))
+		wma_injection_dp_complete(NULL, nbuf, ts->status);
+#endif
+
 	eh = (qdf_ether_header_t *)qdf_nbuf_data(nbuf);
 	length = qdf_nbuf_len(nbuf);
 
@@ -4718,6 +4757,10 @@ dp_tx_comp_process_desc_list(struct dp_soc *soc,
 						    desc->dma_addr,
 						    QDF_DMA_TO_DEVICE,
 						    desc->length);
+#ifdef FEATURE_FRAME_INJECTION_SUPPORT
+			if (dp_tx_is_injection_nbuf(desc->nbuf))
+				wma_injection_dp_complete(NULL, desc->nbuf, desc->tx_status);
+#endif
 			qdf_nbuf_free(desc->nbuf);
 			dp_tx_desc_free(soc, desc, desc->pool_id);
 			desc = next;

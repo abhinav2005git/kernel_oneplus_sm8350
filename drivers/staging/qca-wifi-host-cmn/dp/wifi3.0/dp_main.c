@@ -7658,6 +7658,31 @@ fail:
 	return status;
 }
 
+static QDF_STATUS
+dp_refresh_monitor_mode(struct cdp_soc_t *dp_soc, uint8_t pdev_id,
+			uint8_t vdev_id)
+{
+	struct dp_soc *soc = (struct dp_soc *)dp_soc;
+	struct dp_pdev *pdev;
+	bool configured;
+	QDF_STATUS status;
+	if (!soc)
+		return QDF_STATUS_E_INVAL;
+	pdev = dp_get_pdev_from_soc_pdev_id_wifi3(soc, pdev_id);
+	if (!pdev)
+		return QDF_STATUS_E_INVAL;
+	qdf_spin_lock_bh(&pdev->mon_lock);
+	configured = pdev->monitor_configured;
+	if (configured)
+		dp_mon_filter_setup_mon_mode(pdev);
+	qdf_spin_unlock_bh(&pdev->mon_lock);
+
+	if (!configured)
+		return dp_vdev_set_monitor_mode(dp_soc, vdev_id, false);
+	status = dp_mon_filter_update(pdev);
+	return status;
+}
+
 /**
  * dp_pdev_set_advance_monitor_filter() - Set DP PDEV monitor filter
  * @soc: soc handle
@@ -11553,6 +11578,7 @@ static struct cdp_me_ops dp_ops_me = {
 
 static struct cdp_mon_ops dp_ops_mon = {
 	.txrx_reset_monitor_mode = dp_reset_monitor_mode,
+	.txrx_refresh_monitor_mode = dp_refresh_monitor_mode,
 	/* Added support for HK advance filter */
 	.txrx_set_advance_monitor_filter = dp_pdev_set_advance_monitor_filter,
 	.txrx_deliver_tx_mgmt = dp_deliver_tx_mgmt,
@@ -13340,8 +13366,8 @@ uint16_t dp_get_peer_mac_list(ol_txrx_soc_handle soc, uint8_t vdev_id,
 
 uint16_t dp_get_peer_id(ol_txrx_soc_handle soc, uint8_t vdev_id, uint8_t *mac)
 {
-	struct dp_peer *peer = dp_peer_find_hash_find((struct dp_soc *)soc,
-						       mac, 0, vdev_id,
+	struct dp_soc *dp_soc = (struct dp_soc *)soc;
+	struct dp_peer *peer = dp_peer_find_hash_find(dp_soc, mac, 0, vdev_id,
 						       DP_MOD_ID_CDP);
 	uint16_t peer_id = HTT_INVALID_PEER;
 
@@ -13351,7 +13377,18 @@ uint16_t dp_get_peer_id(ol_txrx_soc_handle soc, uint8_t vdev_id, uint8_t *mac)
 		return peer_id;
 	}
 
+	/*
+	 * A hash entry exists before firmware publishes its peer-map event and
+	 * may remain visible while an unmap is being processed.  Return the ID
+	 * only while the firmware-owned ID map still points at this exact peer.
+	 */
+	qdf_spin_lock_bh(&dp_soc->peer_map_lock);
 	peer_id = peer->peer_id;
+	if (!(peer_id < dp_soc->max_peers &&
+	      dp_soc->peer_id_to_obj_map[peer_id] == peer))
+		peer_id = HTT_INVALID_PEER;
+	qdf_spin_unlock_bh(&dp_soc->peer_map_lock);
+
 	dp_peer_unref_delete(peer, DP_MOD_ID_CDP);
 	return peer_id;
 }
